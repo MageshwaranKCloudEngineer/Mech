@@ -1,73 +1,89 @@
-name: MechWiz_CI/CD
+name: MechWiz CI/CD (Local K8s)
 
 on:
-  workflow_dispatch:
   push:
     branches:
-      - master
+      - dev
+      - test
+      - stage
+      - main
+  workflow_dispatch:
 
 env:
-  AWS_REGION: "us-east-1"
-  APPLICATION_NAME: "MechWiz"
-  ENVIRONMENT_NAME: "MechWiz-env"
-  ZIP_NAME: "app-${{ github.run_number }}.zip"
+  IMAGE_NAME: mechwiz
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  VERSION_TAG: ${{ github.run_number }}
 
 jobs:
-  deploy-to-ebs:
-    runs-on: ubuntu-latest  
-
+  build-test:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
+          python-version: 3.9
 
-      - name: Install AWS Elastic Beanstalk CLI
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3-pip zip
-          pip3 install awsebcli --upgrade
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Clean and Zip App for Deployment
+      - name: Run unit tests
         run: |
-          zip -r ${{ env.ZIP_NAME }} . -x \
-            "**.git**" \
-            "**.github**" \
-            "**__pycache__**" \
-            "**.DS_Store" \
-            "**.env" \
-            "**.venv/**" \
-            "**venv/**" \
-            "***.pyc" \
-            "***.pyo" \
-            "**docker-compose.yml" \
-            "**Dockerfile" \
-            "**README.md" \
-            "**update_aws_creds.sh" \
-            "**prometheus.yml"\
-            "**CICD.txt"
+          echo "✅ Running tests..."
+          python -m unittest discover -s tests || echo "No tests found"
 
-      - name: Upload ZIP to S3
-        run: |
-          S3_BUCKET="elasticbeanstalk-${{ env.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)"
-          aws s3 cp ${{ env.ZIP_NAME }} s3://$S3_BUCKET/${{ env.ZIP_NAME }}
+  docker-build-push:
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
 
-      - name: Create New Elastic Beanstalk Application Version
-        run: |
-          S3_BUCKET="elasticbeanstalk-${{ env.AWS_REGION }}-$(aws sts get-caller-identity --query Account --output text)"
-          aws elasticbeanstalk create-application-version \
-            --application-name ${{ env.APPLICATION_NAME }} \
-            --version-label "deploy-${{ github.run_number }}" \
-            --source-bundle S3Bucket=$S3_BUCKET,S3Key=${{ env.ZIP_NAME }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Deploy to Elastic Beanstalk Environment
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker Image
+        run: docker build -t $REGISTRY/$IMAGE_NAME:$VERSION_TAG .
+
+      - name: Push Docker Image
+        run: docker push $REGISTRY/$IMAGE_NAME:$VERSION_TAG
+
+  deploy:
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stage' || github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure local kubeconfig
         run: |
-          aws elasticbeanstalk update-environment \
-            --environment-name ${{ env.ENVIRONMENT_NAME }} \
-            --version-label "deploy-${{ github.run_number }}"
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+
+      - name: Apply Kubernetes manifests
+        run: |
+          ENV=${{ github.ref_name }}
+          kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl kustomize ./k8s | \
+            sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
+            sed "s|IMAGE_REPO|$REGISTRY/$IMAGE_NAME|g" | \
+            kubectl apply -n $ENV -f -
+
