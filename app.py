@@ -7,36 +7,72 @@ from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_client import Counter, Histogram
 from time import time
 from flask_cors import CORS
+from time import time
+from flask import request, g
+import logging
+import sys
+
 
 
 app = Flask(__name__)
 CORS(app)
 
 metrics = PrometheusMetrics(app, path="/metrics")
+# Configure logging to stdout
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.DEBUG)
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.DEBUG)
+
+
 
 http_requests_total = Counter(
     "http_requests_total",
-    "Total HTTP Requests",
-    ["method", "endpoint"]
+    "Total HTTP requests",
+    ["method", "endpoint", "status"]
 )
 
+# Histogram for request duration
 http_request_duration = Histogram(
     "http_request_duration_seconds",
-    "HTTP Request Duration",
-    ["method", "endpoint"]
+    "HTTP request duration in seconds",
+    ["method", "endpoint", "status"]
 )
 
 @app.before_request
 def start_timer():
-    request.start_time = time()
+    g.start_time = time()
+    # Optional: save request data for metrics
+    g.request_data = request.get_json() if request.is_json else None
+
+@app.teardown_request
+def track_exceptions(error=None):
+    if error:
+        endpoint = request.endpoint or "unknown"
+        method = request.method
+        http_requests_total.labels(method=method, endpoint=endpoint, status="500").inc()
+
 
 @app.after_request
 def log_request(response):
-    if request.endpoint:
-        http_requests_total.labels(method=request.method, endpoint=request.path).inc()
-        request_latency = time() - request.start_time
-        http_request_duration.labels(method=request.method, endpoint=request.path).observe(request_latency)
+    endpoint = request.endpoint or "unknown"
+    method = request.method
+    status = str(response.status_code)
+
+    duration = time() - g.start_time
+
+    # Record metrics
+    http_requests_total.labels(method=method, endpoint=endpoint, status=status).inc()
+    http_request_duration.labels(method=method, endpoint=endpoint, status=status).observe(duration)
+
     return response
+    
+@app.route('/metrics')
+def metrics():
+    from prometheus_client import REGISTRY
+    return generate_latest(REGISTRY), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+
 
 @app.route('/')
 def home():
