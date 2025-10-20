@@ -33,7 +33,7 @@ jobs:
       - name: Run unit tests with coverage
         run: |
           echo "✅ Running pytest with coverage..."
-          pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml tests/
+          pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml test_app.py
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
