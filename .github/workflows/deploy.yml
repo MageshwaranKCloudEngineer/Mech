@@ -205,3 +205,37 @@ jobs:
           echo "🔥 Promotion triggered for $BRANCH"
           git checkout $BRANCH
           # Call the same deploy logic here
+
+
+      # 🟢 Port-forward services temporarily for integration testing
+      - name: Port-forward services for testing
+        run: |
+          echo "Starting port-forwards..."
+
+          kubectl port-forward svc/mechwiz-service 8081:80 -n mech &
+          MECH_PID=$!
+
+          kubectl port-forward svc/grafana-service 3000:3000 -n mech &
+          GRAF_PID=$!
+
+          kubectl port-forward svc/dynamodb-service 8000:8000 -n mech &
+          DYNAMO_PID=$!
+
+          kubectl port-forward svc/prometheus-service 9090:9090 -n mech &
+          PROM_PID=$!
+
+          # Wait a few seconds for port-forwards to be ready
+          sleep 5
+
+          echo "Port-forwards started. Running integration tests..."
+
+          # Example: Test Mechwiz service
+          curl -s http://localhost:8081/health || echo "⚠️ Mechwiz service not ready"
+
+          # Example: Test DynamoDB
+          curl -s http://localhost:8000/ || echo "⚠️ DynamoDB not ready"
+
+          # Cleanup all port-forwards
+          echo "Cleaning up port-forwards..."
+          kill $MECH_PID $GRAF_PID $DYNAMO_PID $PROM_PID
+
