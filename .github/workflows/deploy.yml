@@ -11,11 +11,10 @@ on:
 
 env:
   IMAGE_NAME: mechwiz
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
   VERSION_TAG: ${{ github.run_number }}
 
 jobs:
-  # 1️⃣ Build & Test with Pytest, Coverage & SonarQube
+  # 1️⃣ Build & Test with Pytest
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -26,14 +25,11 @@ jobs:
         with:
           python-version: 3.9
 
-      - name: Install Python dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Run unit tests with coverage
-        run: |
-          echo "✅ Running pytest with coverage..."
-          pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml test_app.py
+      - name: Run tests
+        run: pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml test_app.py
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -47,78 +43,64 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-  # 2️⃣ Docker Build
-  build-docker-local:
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
-
-  # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod) using kind
+  # 2️⃣ Deploy to environment using kind
   deploy-to-env:
-    needs: build-docker-local
+    needs: build-and-test
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.ref_name }}
-      url: https://mechwiz-${{ github.ref_name }}.local
-    if: |
-      github.ref == 'refs/heads/dev' ||
-      github.ref == 'refs/heads/test' ||
-      github.ref == 'refs/heads/stage' ||
-      github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/heads/dev') || startsWith(github.ref, 'refs/heads/test') || startsWith(github.ref, 'refs/heads/stage') || startsWith(github.ref, 'refs/heads/main')
     steps:
       - uses: actions/checkout@v4
 
-      # 🟢 Setup Docker (required for kind)
+      # Docker setup
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      # 🟢 Install kind
+      # Install kind
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      # 🟢 Create local kind cluster
+      # Create kind cluster
       - name: Create kind cluster
         run: kind create cluster --name mechwiz-cluster
 
-      # 🟢 Verify cluster
-      - name: Verify kind cluster
+      - name: Verify cluster
         run: kubectl cluster-info
 
-      - name: Build Docker image locally
-        run: |
-          echo "🔹 Building local Docker image..."
-          docker build -t $IMAGE_NAME:latest .
+      # Build Docker image inside deploy job
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME:latest .
 
-      # 🟢 Load Docker image into kind
-      - name: Load Docker image into kind
+      # Load Docker image into kind
+      - name: Load image into kind
         run: kind load docker-image $IMAGE_NAME:latest --name mechwiz-cluster
 
-      # 🟢 Deploy Kubernetes manifests
-      - name: Apply Kubernetes manifests
+      # Apply Kubernetes manifests
+      - name: Deploy Kubernetes manifests
         run: |
           ENV=${{ github.ref_name }}
-          echo "🚀 Deploying to $ENV environment"
+          echo "🚀 Deploying to $ENV"
           kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-          kubectl kustomize ./k8s/$ENV | \
-            sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
-            sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
-            kubectl apply -n $ENV -f - --validate=false
+          if [ -d "./k8s/$ENV" ]; then
+            kubectl kustomize ./k8s/$ENV | \
+              sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
+              sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
+              kubectl apply -n $ENV -f - --validate=false
+          else
+            echo "⚠️ Directory ./k8s/$ENV not found, skipping deployment"
+          fi
 
-      # 🟢 Setup Terraform CLI
-      - name: Setup Terraform CLI
+      # Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
 
-      # 🟢 Terraform Init, Plan & Apply
-      - name: Terraform Init, Plan & Apply
+      - name: Terraform Init & Apply
         run: |
           terraform -chdir=./terraform init
           terraform -chdir=./terraform plan -out=plan.tfplan
@@ -127,8 +109,8 @@ jobs:
           TF_VAR_image_repo: $IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
 
-      # 🟢 Prometheus Health Check
-      - name: Prometheus Health Check
+      # Health check
+      - name: Wait for pods
         run: |
           ENV=${{ github.ref_name }}
           for i in {1..12}; do
@@ -142,48 +124,80 @@ jobs:
             fi
           done
           if [ ! -z "$NOT_READY" ]; then
-            echo "❌ Pods not ready after 2 minutes. Failing deployment."
+            echo "❌ Pods not ready, failing deployment."
             exit 1
           fi
 
-      # 🟢 Deploy Grafana dashboards (optional)
+      # Optional Grafana dashboards
       - name: Deploy Grafana dashboards
         run: |
           ENV=${{ github.ref_name }}
-          curl -s -X POST -H "Content-Type: application/json" \
-            -d @./grafana/dashboards.json \
-            http://admin:admin@grafana-service:3000/api/dashboards/db || echo "⚠️ Dashboard provisioning failed"
+          if [ -f ./grafana/dashboards.json ]; then
+            curl -s -X POST -H "Content-Type: application/json" \
+              -d @./grafana/dashboards.json \
+              http://admin:admin@grafana-service:3000/api/dashboards/db || echo "⚠️ Dashboard provisioning failed"
 
-  # 4️⃣ Auto-promote Dev → Test
-  promote-dev-to-test:
+  # 3️⃣ Auto-promote dev → test → stage
+  promote-envs:
     needs: deploy-to-env
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/dev' && needs.deploy-to-env.result == 'success'
     steps:
-      - uses: peter-evans/repository-dispatch@v4
+      # Merge dev → test automatically
+      - name: Merge dev → test
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout test
+          git merge dev --no-ff -m "Automated merge dev → test"
+          git push origin test
+      - name: Trigger deployment for test
+        if: github.ref == 'refs/heads/dev'
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: promote-to-test
           client-payload: '{"branch": "test"}'
 
-  # 5️⃣ Wait for manual approval before Prod
-  approve-prod:
+      # Merge test → stage automatically
+      - name: Merge test → stage
+        if: github.ref == 'refs/heads/test'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout stage
+          git merge test --no-ff -m "Automated merge test → stage"
+          git push origin stage
+      - name: Trigger deployment for stage
+        if: github.ref == 'refs/heads/test'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: promote-to-stage
+          client-payload: '{"branch": "stage"}'
+
+  # 4️⃣ Manual approval before main
+  approve-main:
     needs: deploy-to-env
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/stage'
     environment:
-      name: prod
-      url: https://mechwiz-prod.local
+      name: main
     steps:
       - name: Await manual approval
         uses: hmarr/auto-approve-action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 6️⃣ Listener for promotion events
+  # 5️⃣ Listener for promotion events
   handle-promotion:
-    if: github.event_name == 'repository_dispatch' && github.event.action == 'promote-to-test'
+    if: github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "🔥 Dev → Test promotion triggered"
+      - name: Deploy promoted branch
+        run: |
+          BRANCH="${{ github.event.client_payload.branch }}"
+          echo "🔥 Promotion triggered for $BRANCH"
+          git checkout $BRANCH
+          # Call the same deploy logic here
