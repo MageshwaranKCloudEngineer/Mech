@@ -47,18 +47,7 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-      # # Optional: Analyze code quality with SonarQube
-      # - name: SonarQube Scan
-      #   uses: SonarSource/sonarcloud-github-action@v2
-      #   with:
-      #     projectBaseDir: .
-      #     args: >
-      #       -Dsonar.login=${{ secrets.SONAR_TOKEN }}
-      #       -Dsonar.projectKey=MechWiz
-      #       -Dsonar.sources=app
-      #       -Dsonar.python.coverage.reportPaths=coverage.xml
-
-  # 2️⃣ Docker Build & Push
+  # 2️⃣ Docker Build
   build-docker-local:
     needs: build-and-test
     runs-on: ubuntu-latest
@@ -73,7 +62,7 @@ jobs:
           echo "🔹 Building local Docker image..."
           docker build -t $IMAGE_NAME:latest .
 
-  # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod)
+  # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod) using kind
   deploy-to-env:
     needs: build-docker-local
     runs-on: ubuntu-latest
@@ -88,14 +77,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/setup-kubectl@v4
-        with:
-          version: 'latest'
+      # 🟢 Setup Docker (required for kind)
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
 
-      - run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+      # 🟢 Install kind
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
 
+      # 🟢 Create local kind cluster
+      - name: Create kind cluster
+        run: kind create cluster --name mechwiz-cluster
+
+      # 🟢 Verify cluster
+      - name: Verify kind cluster
+        run: kubectl cluster-info
+
+      # 🟢 Load Docker image into kind
+      - name: Load Docker image into kind
+        run: kind load docker-image $IMAGE_NAME:latest --name mechwiz-cluster
+
+      # 🟢 Deploy Kubernetes manifests
       - name: Apply Kubernetes manifests
         run: |
           ENV=${{ github.ref_name }}
@@ -103,24 +108,26 @@ jobs:
           kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
           kubectl kustomize ./k8s/$ENV | \
             sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
-            sed "s|IMAGE_REPO|$REGISTRY/$IMAGE_NAME|g" | \
-            kubectl apply -n $ENV -f -
+            sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
+            kubectl apply -n $ENV -f - --validate=false
 
+      # 🟢 Setup Terraform CLI
       - name: Setup Terraform CLI
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.5.0  # pick the version you want
+          terraform_version: 1.5.0
 
+      # 🟢 Terraform Init, Plan & Apply
       - name: Terraform Init, Plan & Apply
         run: |
           terraform -chdir=./terraform init
           terraform -chdir=./terraform plan -out=plan.tfplan
           terraform -chdir=./terraform apply -auto-approve
         env:
-          TF_VAR_image_repo: $REGISTRY/$IMAGE_NAME
+          TF_VAR_image_repo: $IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
 
-
+      # 🟢 Prometheus Health Check
       - name: Prometheus Health Check
         run: |
           ENV=${{ github.ref_name }}
@@ -139,6 +146,7 @@ jobs:
             exit 1
           fi
 
+      # 🟢 Deploy Grafana dashboards (optional)
       - name: Deploy Grafana dashboards
         run: |
           ENV=${{ github.ref_name }}
@@ -179,4 +187,3 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: echo "🔥 Dev → Test promotion triggered"
-      
