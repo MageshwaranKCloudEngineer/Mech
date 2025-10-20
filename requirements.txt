@@ -4,5 +4,7 @@ gunicorn
 prometheus_flask_exporter
 prometheus-client
 flask-cors
-pytest
 pytest-flask
+pytest 
+pytest-cov 
+coverage==7.10.7
