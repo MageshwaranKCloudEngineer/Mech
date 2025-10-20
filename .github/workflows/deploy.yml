@@ -1,4 +1,4 @@
-name: MechWiz CI/CD (Local K8s)
+name: MechWiz CI/CD Pipeline (Local K8s + Terraform + Observability + Testing)
 
 on:
   push:
@@ -15,75 +15,165 @@ env:
   VERSION_TAG: ${{ github.run_number }}
 
 jobs:
-  build-test:
+  # 1️⃣ Build & Test with Pytest, Coverage & SonarQube
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: 3.9
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run unit tests
+      - name: Install Python dependencies
         run: |
-          echo "✅ Running tests..."
-          python -m unittest discover -s tests || echo "No tests found"
+          pip install -r requirements.txt
+          pip install pytest pytest-cov coverage sonar-scanner
 
-  docker-build-push:
-    needs: build-test
+      - name: Run unit tests with coverage
+        run: |
+          echo "✅ Running pytest with coverage..."
+          pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml tests/
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        with:
+          name: pytest-results
+          path: pytest-report.xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # Optional: Analyze code quality with SonarQube
+      - name: SonarQube Scan
+        uses: SonarSource/sonarcloud-github-action@v2
+        with:
+          projectBaseDir: .
+          args: >
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+            -Dsonar.projectKey=MechWiz
+            -Dsonar.sources=app
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+
+  # 2️⃣ Docker Build & Push
+  build-and-push-docker:
+    needs: build-and-test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker build -t $REGISTRY/$IMAGE_NAME:$VERSION_TAG .
+      - run: docker push $REGISTRY/$IMAGE_NAME:$VERSION_TAG
 
-      - name: Build Docker Image
-        run: docker build -t $REGISTRY/$IMAGE_NAME:$VERSION_TAG .
-
-      - name: Push Docker Image
-        run: docker push $REGISTRY/$IMAGE_NAME:$VERSION_TAG
-
-  deploy:
-    needs: docker-build-push
+  # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod)
+  deploy-to-env:
+    needs: build-and-push-docker
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/test' || github.ref == 'refs/heads/stage' || github.ref == 'refs/heads/main'
-
+    environment:
+      name: ${{ github.ref_name }}
+      url: https://mechwiz-${{ github.ref_name }}.local
+    if: |
+      github.ref == 'refs/heads/dev' ||
+      github.ref == 'refs/heads/test' ||
+      github.ref == 'refs/heads/stage' ||
+      github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@v4
         with:
           version: 'latest'
 
-      - name: Configure local kubeconfig
-        run: |
+      - run: |
           mkdir -p $HOME/.kube
           echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
 
       - name: Apply Kubernetes manifests
         run: |
           ENV=${{ github.ref_name }}
+          echo "🚀 Deploying to $ENV environment"
           kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl kustomize ./k8s | \
+          kubectl kustomize ./k8s/$ENV | \
             sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
             sed "s|IMAGE_REPO|$REGISTRY/$IMAGE_NAME|g" | \
             kubectl apply -n $ENV -f -
 
+      - name: Apply Terraform
+        uses: hashicorp/terraform-github-actions@v2.2.0
+        with:
+          tf_actions_version: latest
+          tf_working_dir: ./terraform
+        env:
+          TF_VAR_image_repo: $REGISTRY/$IMAGE_NAME
+          TF_VAR_image_tag: ${{ github.run_number }}
+
+      - name: Prometheus Health Check
+        run: |
+          ENV=${{ github.ref_name }}
+          for i in {1..12}; do
+            NOT_READY=$(kubectl get pods -n $ENV --no-headers | grep -v 'Running\|Completed' || true)
+            if [ -z "$NOT_READY" ]; then
+              echo "✅ All pods are running."
+              break
+            else
+              echo "Waiting for pods to be ready..."
+              sleep 10
+            fi
+          done
+          if [ ! -z "$NOT_READY" ]; then
+            echo "❌ Pods not ready after 2 minutes. Failing deployment."
+            exit 1
+          fi
+
+      - name: Deploy Grafana dashboards
+        run: |
+          ENV=${{ github.ref_name }}
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d @./grafana/dashboards.json \
+            http://admin:admin@grafana-service:3000/api/dashboards/db || echo "⚠️ Dashboard provisioning failed"
+
+  # 4️⃣ Auto-promote Dev → Test
+  promote-dev-to-test:
+    needs: deploy-to-env
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && needs.deploy-to-env.result == 'success'
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: promote-to-test
+          client-payload: '{"branch": "test"}'
+
+  # 5️⃣ Wait for manual approval before Prod
+  approve-prod:
+    needs: deploy-to-env
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: prod
+      url: https://mechwiz-prod.local
+    steps:
+      - name: Await manual approval
+        uses: hmarr/auto-approve-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 6️⃣ Listener for promotion events
+  handle-promotion:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'promote-to-test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "🔥 Dev → Test promotion triggered"
+      

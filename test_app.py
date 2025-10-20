@@ -1,7 +1,7 @@
 import pytest
 import json
 from unittest.mock import patch, MagicMock
-from app.py import app  # Replace with your actual flask app module name
+from app import app  # Replace with your actual flask app module name
 
 @pytest.fixture
 def client():
@@ -35,7 +35,7 @@ def test_book_appointment_page(client):
     assert rv.status_code == 200
     assert b"<!DOCTYPE html>" in rv.data
 
-@patch('your_flask_app_file.service_centers_table')
+@patch('app.service_centers_table')
 def test_get_service_center_by_id_found(mock_table, client):
     # Mock DynamoDB get_item response
     mock_table.get_item.return_value = {
@@ -53,7 +53,7 @@ def test_get_service_center_by_id_found(mock_table, client):
     assert data["id"] == "123"
     assert data["name"] == "Test Center"
 
-@patch('your_flask_app_file.service_centers_table')
+@patch('app.service_centers_table')
 def test_get_service_center_by_id_not_found(mock_table, client):
     mock_table.get_item.return_value = {}
     rv = client.get('/service-center/999')
@@ -61,7 +61,7 @@ def test_get_service_center_by_id_not_found(mock_table, client):
     data = rv.get_json()
     assert "error" in data
 
-@patch('your_flask_app_file.service_centers_table')
+@patch('app.service_centers_table')
 def test_add_service_center_success(mock_table, client):
     mock_table.put_item.return_value = {}
     new_center = {
@@ -80,7 +80,7 @@ def test_add_service_center_success(mock_table, client):
     assert item is not None
     assert item["name"] == "New Center"
 
-@patch('your_flask_app_file.service_centers_table')
+@patch('app.service_centers_table')
 def test_add_service_center_failure(mock_table, client):
     mock_table.put_item.side_effect = Exception("DynamoDB error")
     new_center = {
