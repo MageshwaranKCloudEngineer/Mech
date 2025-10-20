@@ -85,8 +85,8 @@ jobs:
           ENV=${{ github.ref_name }}
           echo "🚀 Deploying to $ENV"
           kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-          if [ -d "./k8s/$ENV" ]; then
-            kubectl kustomize ./k8s/$ENV | \
+          if [ -d "./k8s" ]; then
+            kubectl kustomize ./k8s | \
               sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
               sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
               kubectl apply -n $ENV -f - --validate=false
