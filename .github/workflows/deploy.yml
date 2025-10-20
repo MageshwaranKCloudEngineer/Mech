@@ -57,11 +57,6 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image locally
-        run: |
-          echo "🔹 Building local Docker image..."
-          docker build -t $IMAGE_NAME:latest .
-
   # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod) using kind
   deploy-to-env:
     needs: build-docker-local
@@ -95,6 +90,11 @@ jobs:
       # 🟢 Verify cluster
       - name: Verify kind cluster
         run: kubectl cluster-info
+
+      - name: Build Docker image locally
+        run: |
+          echo "🔹 Building local Docker image..."
+          docker build -t $IMAGE_NAME:latest .
 
       # 🟢 Load Docker image into kind
       - name: Load Docker image into kind
