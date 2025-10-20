@@ -106,14 +106,20 @@ jobs:
             sed "s|IMAGE_REPO|$REGISTRY/$IMAGE_NAME|g" | \
             kubectl apply -n $ENV -f -
 
-      - name: Apply Terraform
-        uses: hashicorp/terraform-github-actions@v2.2.0
+      - name: Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v3
         with:
-          tf_actions_version: latest
-          tf_working_dir: ./terraform
+          terraform_version: 1.5.0  # pick the version you want
+
+      - name: Terraform Init, Plan & Apply
+        run: |
+          terraform -chdir=./terraform init
+          terraform -chdir=./terraform plan -out=plan.tfplan
+          terraform -chdir=./terraform apply -auto-approve
         env:
           TF_VAR_image_repo: $REGISTRY/$IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
+
 
       - name: Prometheus Health Check
         run: |
