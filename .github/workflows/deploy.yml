@@ -89,8 +89,14 @@ jobs:
         # Apply Kubernetes manifests (all in ./k8)  
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply -f k8/dynamodb*.yaml
-          kubectl apply -f k8/ -n mech
+          kubectl get namespace $ENV >/dev/null 2>&1 || kubectl create namespace
+          for file in k8/dynamodb*.yaml; do
+            kubectl apply -f "$file" -n $ENV
+          done
+
+          for file in k8/*.yaml; do
+            [ "$file" != "k8/dynamodb-service.yaml" ] && kubectl apply -f "$file" -n $ENV
+          done
 
     # Verify deployments and services
       - name: Verify resources
