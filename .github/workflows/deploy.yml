@@ -47,16 +47,16 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-      # Optional: Analyze code quality with SonarQube
-      - name: SonarQube Scan
-        uses: SonarSource/sonarcloud-github-action@v2
-        with:
-          projectBaseDir: .
-          args: >
-            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
-            -Dsonar.projectKey=MechWiz
-            -Dsonar.sources=app
-            -Dsonar.python.coverage.reportPaths=coverage.xml
+      # # Optional: Analyze code quality with SonarQube
+      # - name: SonarQube Scan
+      #   uses: SonarSource/sonarcloud-github-action@v2
+      #   with:
+      #     projectBaseDir: .
+      #     args: >
+      #       -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+      #       -Dsonar.projectKey=MechWiz
+      #       -Dsonar.sources=app
+      #       -Dsonar.python.coverage.reportPaths=coverage.xml
 
   # 2️⃣ Docker Build & Push
   build-and-push-docker:
