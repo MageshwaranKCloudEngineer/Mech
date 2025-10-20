@@ -84,16 +84,20 @@ jobs:
         run: |
           ENV=${{ github.ref_name }}
           echo "🚀 Deploying to $ENV"
-          kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-          if [ -d "./k8s" ]; then
-            kubectl kustomize ./k8s | \
-              sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
-              sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
-              kubectl apply -n $ENV -f - --validate=false
-          else
-            echo "⚠️ Directory ./k8s/$ENV not found, skipping deployment"
-          fi
+          kubectl create namespace $ENV --dry-run=client -o yaml 
 
+        # Apply Kubernetes manifests (all in ./k8)  
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8/dynamodb*.yaml
+          kubectl apply -f k8/ -n mech
+
+    # Verify deployments and services
+      - name: Verify resources
+        run: |
+          kubectl get pods -n mech
+          kubectl get svc -n mech
+          kubectl get ingress -n mech
       # Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
