@@ -1,8 +1,3 @@
-variable "env" {
-  description = "Environment name (dev/staging/prod)"
-  type        = string
-}
-
 resource "aws_dynamodb_table" "service_centers" {
   name         = "${var.env}_ServiceCentersTable"
   billing_mode = "PAY_PER_REQUEST"
@@ -43,3 +38,4 @@ output "tables" {
     aws_dynamodb_table.appointment.name
   ]
 }
+
