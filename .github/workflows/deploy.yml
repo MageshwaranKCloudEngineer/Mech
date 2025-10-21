@@ -113,10 +113,25 @@ jobs:
           kubectl apply -n $ENV -f k8/ingress.yaml
           kubectl apply -n $ENV -f k8/tmp-mechwiz-deployment.yaml
 
+
+      - name: kubernetes checkup
+        run: |
+          kubectl get deployment $ENV
+          kubectl get svc $ENV
+          kubectl get pods $ENV
+          
+
       - name: Setup Terraform CLI
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
+
+
+      - name: Pull DynamoDB Local Docker image
+        run: docker pull amazon/dynamodb-local
+
+      - name: Start DynamoDB Local
+        run: docker run -d -p 8000:8000 amazon/dynamodb-local
 
       - name: Terraform Init, Plan & Apply
         run: |
@@ -125,6 +140,8 @@ jobs:
           terraform -chdir=terraform/envs/$ENV plan -out=plan.tfplan
           terraform -chdir=terraform/envs/$ENV apply -auto-approve
         env:
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
           TF_VAR_image_repo: $IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
 
