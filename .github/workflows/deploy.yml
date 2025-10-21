@@ -71,11 +71,6 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      - name: Create namespace if not exists
-        run: |
-          ENV=${{ github.ref_name }}
-          kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
@@ -87,6 +82,11 @@ jobs:
 
       - name: Verify kind cluster
         run: kubectl cluster-info
+        
+      - name: Create namespace if not exists
+        run: |
+          ENV=${{ github.ref_name }}
+          kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Build Docker image locally
         run: |
