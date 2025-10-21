@@ -11,6 +11,7 @@ provider "aws" {
 
 module "dynamodb" {
   source = "../../modules/dynamodb"
+  env    = "stage"
   providers = {
     aws = aws.local
   }
