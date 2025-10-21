@@ -12,6 +12,7 @@ provider "aws" {
 module "dynamodb" {
   source = "../../modules/dynamodb"
   providers = {
-    aws = "dev"
+    aws = aws.local
   }
 }
+
