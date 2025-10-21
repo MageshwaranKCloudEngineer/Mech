@@ -116,6 +116,7 @@ jobs:
 
       - name: kubernetes checkup
         run: |
+          ENV=${{ github.ref_name }}
           kubectl get deployment -n $ENV
           kubectl get svc -n $ENV
           kubectl get pods -n $ENV
