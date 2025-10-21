@@ -2,11 +2,7 @@ name: MechWiz CI/CD Pipeline (Local K8s + Terraform + Observability + Testing)
 
 on:
   push:
-    branches:
-      - dev
-      - test
-      - stage
-      - main
+    branches: [dev, test, stage, main]
   workflow_dispatch:
 
 env:
@@ -33,7 +29,7 @@ jobs:
       - name: Run unit tests with coverage
         run: |
           echo "✅ Running pytest with coverage..."
-          pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml test_app.py
+          pytest --cov=app.py --cov-report=xml --junitxml=pytest-report.xml test_app.py
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -57,7 +53,7 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-  # 3️⃣ Deploy to environment (Dev, Test, Stage, Prod) using kind
+  # 3️⃣ Deploy to environment using kind
   deploy-to-env:
     needs: build-docker-local
     runs-on: ubuntu-latest
@@ -72,22 +68,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 🟢 Setup Docker (required for kind)
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      # 🟢 Install kind
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      # 🟢 Create local kind cluster
       - name: Create kind cluster
         run: kind create cluster --name mechwiz-cluster
 
-      # 🟢 Verify cluster
       - name: Verify kind cluster
         run: kubectl cluster-info
 
@@ -96,38 +88,34 @@ jobs:
           echo "🔹 Building local Docker image..."
           docker build -t $IMAGE_NAME:latest .
 
-      # 🟢 Load Docker image into kind
       - name: Load Docker image into kind
         run: kind load docker-image $IMAGE_NAME:latest --name mechwiz-cluster
 
-      # 🟢 Deploy Kubernetes manifests
       - name: Apply Kubernetes manifests
         run: |
           ENV=${{ github.ref_name }}
           echo "🚀 Deploying to $ENV environment"
           kubectl create namespace $ENV --dry-run=client -o yaml | kubectl apply -f -
-          kubectl kustomize ./k8s/$ENV | \
+          kubectl kustomize ./k8 | \
             sed "s|IMAGE_TAG|${{ github.run_number }}|g" | \
             sed "s|IMAGE_REPO|$IMAGE_NAME|g" | \
             kubectl apply -n $ENV -f - --validate=false
 
-      # 🟢 Setup Terraform CLI
       - name: Setup Terraform CLI
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
 
-      # 🟢 Terraform Init, Plan & Apply
       - name: Terraform Init, Plan & Apply
         run: |
-          terraform -chdir=./terraform init
-          terraform -chdir=./terraform plan -out=plan.tfplan
-          terraform -chdir=./terraform apply -auto-approve
+          ENV=${{ github.ref_name }}
+          terraform -chdir=terraform/envs/$ENV init
+          terraform -chdir=terraform/envs/$ENV plan -out=plan.tfplan
+          terraform -chdir=terraform/envs/$ENV apply -auto-approve
         env:
           TF_VAR_image_repo: $IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
 
-      # 🟢 Prometheus Health Check
       - name: Prometheus Health Check
         run: |
           ENV=${{ github.ref_name }}
@@ -146,13 +134,9 @@ jobs:
             exit 1
           fi
 
-      # 🟢 Deploy Grafana dashboards (optional)
-      - name: Deploy Grafana dashboards
+      - name: Deploy Grafana dashboards (optional)
         run: |
-          ENV=${{ github.ref_name }}
-          curl -s -X POST -H "Content-Type: application/json" \
-            -d @./grafana/dashboards.json \
-            http://admin:admin@grafana-service:3000/api/dashboards/db || echo "⚠️ Dashboard provisioning failed"
+          echo "⚠️ No Grafana dashboards.json found. Skipping dashboard deployment."
 
   # 4️⃣ Auto-promote Dev → Test
   promote-dev-to-test:
