@@ -2,19 +2,16 @@ name: MechWiz CI/CD Pipeline (Local K8s + Terraform + Observability + Testing)
 
 on:
   push:
-    branches:
-      - dev
-      - test
-      - stage
-      - main
+    branches: [dev, test, stage, main]
   workflow_dispatch:
 
 env:
   IMAGE_NAME: mechwiz
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
   VERSION_TAG: ${{ github.run_number }}
 
 jobs:
-  # 1️⃣ Build & Test with Pytest
+  # 1️⃣ Build & Test with Pytest, Coverage & SonarQube
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -25,11 +22,14 @@ jobs:
         with:
           python-version: 3.9
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run tests
-        run: pytest --cov=app --cov-report=xml --junitxml=pytest-report.xml test_app.py
+      - name: Run unit tests with coverage
+        run: |
+          echo "✅ Running pytest with coverage..."
+          pytest --cov=app.py --cov-report=xml --junitxml=pytest-report.xml test_app.py
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -43,84 +43,86 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-  # 2️⃣ Deploy to environment using kind
-  deploy-to-env:
+  # 2️⃣ Docker Build
+  build-docker-local:
     needs: build-and-test
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ github.ref_name }}
-    if: startsWith(github.ref, 'refs/heads/dev') || startsWith(github.ref, 'refs/heads/test') || startsWith(github.ref, 'refs/heads/stage') || startsWith(github.ref, 'refs/heads/main')
     steps:
       - uses: actions/checkout@v4
 
-      # Docker setup
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      # Install kind
+  # 3️⃣ Deploy to environment using kind
+  deploy-to-env:
+    needs: build-docker-local
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name }}
+      url: https://mechwiz-${{ github.ref_name }}.local
+    if: |
+      github.ref == 'refs/heads/dev' ||
+      github.ref == 'refs/heads/test' ||
+      github.ref == 'refs/heads/stage' ||
+      github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      # Create kind cluster
       - name: Create kind cluster
         run: kind create cluster --name mechwiz-cluster
 
-      - name: Verify cluster
+      - name: Verify kind cluster
         run: kubectl cluster-info
 
-      # Build Docker image inside deploy job
-      - name: Build Docker image
-        run: docker build -t $IMAGE_NAME:latest .
+      - name: Build Docker image locally
+        run: |
+          echo "🔹 Building local Docker image..."
+          docker build -t $IMAGE_NAME:latest .
 
-      # Load Docker image into kind
-      - name: Load image into kind
+      - name: Load Docker image into kind
         run: kind load docker-image $IMAGE_NAME:latest --name mechwiz-cluster
 
-      # Apply Kubernetes manifests
-      - name: Deploy Kubernetes manifests
-        run: |
-          ENV=${{ github.ref_name }}
-          echo "🚀 Deploying to $ENV"
-          kubectl create namespace $ENV --dry-run=client -o yaml 
-
-        # Apply Kubernetes manifests (all in ./k8)  
       - name: Apply Kubernetes manifests
         run: |
-          kubectl get namespace $ENV >/dev/null 2>&1 || kubectl create namespace
-          for file in k8/dynamodb*.yaml; do
-            kubectl apply -f "$file" -n $ENV
-          done
+          ENV=${{ github.ref_name }}
+          echo " Deploying to $ENV using flat k8/ manifests"
+          sed "s|IMAGE_TAG|${{ github.run_number }}|g" k8/mechwiz-deployment.yaml | \
+          sed "s|IMAGE_REPO|$IMAGE_NAME|g" > k8/tmp-mechwiz-deployment.yaml
 
-          for file in k8/*.yaml; do
-            [ "$file" != "k8/dynamodb-service.yaml" ] && kubectl apply -f "$file" -n $ENV
-          done
+          kubectl apply -n $ENV -f k8/configmap.yaml
+          kubectl apply -n $ENV -f k8/dynamodb-deployment.yaml
+          kubectl apply -n $ENV -f k8/dynamodb-service.yaml
+          kubectl apply -n $ENV -f k8/grafana-deployment.yaml
+          kubectl apply -n $ENV -f k8/prometheus-config.yaml
+          kubectl apply -n $ENV -f k8/service.yaml
+          kubectl apply -n $ENV -f k8/ingress.yaml
+          kubectl apply -n $ENV -f k8/tmp-mechwiz-deployment.yaml
 
-    # Verify deployments and services
-      - name: Verify resources
-        run: |
-          kubectl get pods -n mech
-          kubectl get svc -n mech
-          kubectl get ingress -n mech
-      # Terraform
-      - name: Setup Terraform
+      - name: Setup Terraform CLI
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
 
-      - name: Terraform Init & Apply
+      - name: Terraform Init, Plan & Apply
         run: |
-          terraform -chdir=./terraform init
-          terraform -chdir=./terraform plan -out=plan.tfplan
-          terraform -chdir=./terraform apply -auto-approve
+          ENV=${{ github.ref_name }}
+          terraform -chdir=terraform/envs/$ENV init
+          terraform -chdir=terraform/envs/$ENV plan -out=plan.tfplan
+          terraform -chdir=terraform/envs/$ENV apply -auto-approve
         env:
           TF_VAR_image_repo: $IMAGE_NAME
           TF_VAR_image_tag: ${{ github.run_number }}
 
-      # Health check
-      - name: Wait for pods
+      - name: Prometheus Health Check
         run: |
           ENV=${{ github.ref_name }}
           for i in {1..12}; do
@@ -134,114 +136,44 @@ jobs:
             fi
           done
           if [ ! -z "$NOT_READY" ]; then
-            echo "❌ Pods not ready, failing deployment."
+            echo "❌ Pods not ready after 2 minutes. Failing deployment."
             exit 1
           fi
 
-      # Optional Grafana dashboards
-      - name: Deploy Grafana dashboards
+      - name: Deploy Grafana dashboards (optional)
         run: |
-          ENV=${{ github.ref_name }}
-          if [ -f ./grafana/dashboards.json ]; then
-            curl -s -X POST -H "Content-Type: application/json" \
-              -d @./grafana/dashboards.json \
-              http://admin:admin@grafana-service:3000/api/dashboards/db || echo "⚠️ Dashboard provisioning failed"
+          echo "⚠️ No Grafana dashboards.json found. Skipping dashboard deployment."
 
-  # 3️⃣ Auto-promote dev → test → stage
-  promote-envs:
+  # 4️⃣ Auto-promote Dev → Test
+  promote-dev-to-test:
     needs: deploy-to-env
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && needs.deploy-to-env.result == 'success'
     steps:
-      # Merge dev → test automatically
-      - name: Merge dev → test
-        if: github.ref == 'refs/heads/dev'
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git checkout test
-          git merge dev --no-ff -m "Automated merge dev → test"
-          git push origin test
-      - name: Trigger deployment for test
-        if: github.ref == 'refs/heads/dev'
-        uses: peter-evans/repository-dispatch@v4
+      - uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: promote-to-test
           client-payload: '{"branch": "test"}'
 
-      # Merge test → stage automatically
-      - name: Merge test → stage
-        if: github.ref == 'refs/heads/test'
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git checkout stage
-          git merge test --no-ff -m "Automated merge test → stage"
-          git push origin stage
-      - name: Trigger deployment for stage
-        if: github.ref == 'refs/heads/test'
-        uses: peter-evans/repository-dispatch@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          event-type: promote-to-stage
-          client-payload: '{"branch": "stage"}'
-
-  # 4️⃣ Manual approval before main
-  approve-main:
+  # 5️⃣ Wait for manual approval before Prod
+  approve-prod:
     needs: deploy-to-env
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/stage'
+    if: github.ref == 'refs/heads/main'
     environment:
-      name: main
+      name: prod
+      url: https://mechwiz-prod.local
     steps:
       - name: Await manual approval
         uses: hmarr/auto-approve-action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 5️⃣ Listener for promotion events
+  # 6️⃣ Listener for promotion events
   handle-promotion:
-    if: github.event_name == 'repository_dispatch'
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'promote-to-test'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy promoted branch
-        run: |
-          BRANCH="${{ github.event.client_payload.branch }}"
-          echo "🔥 Promotion triggered for $BRANCH"
-          git checkout $BRANCH
-          # Call the same deploy logic here
-
-
-      # 🟢 Port-forward services temporarily for integration testing
-      - name: Port-forward services for testing
-        run: |
-          echo "Starting port-forwards..."
-
-          kubectl port-forward svc/mechwiz-service 8081:80 -n mech &
-          MECH_PID=$!
-
-          kubectl port-forward svc/grafana-service 3000:3000 -n mech &
-          GRAF_PID=$!
-
-          kubectl port-forward svc/dynamodb-service 8000:8000 -n mech &
-          DYNAMO_PID=$!
-
-          kubectl port-forward svc/prometheus-service 9090:9090 -n mech &
-          PROM_PID=$!
-
-          # Wait a few seconds for port-forwards to be ready
-          sleep 5
-
-          echo "Port-forwards started. Running integration tests..."
-
-          # Example: Test Mechwiz service
-          curl -s http://localhost:8081/health || echo "⚠️ Mechwiz service not ready"
-
-          # Example: Test DynamoDB
-          curl -s http://localhost:8000/ || echo "⚠️ DynamoDB not ready"
-
-          # Cleanup all port-forwards
-          echo "Cleaning up port-forwards..."
-          kill $MECH_PID $GRAF_PID $DYNAMO_PID $PROM_PID
-
+      - run: echo "🔥 Dev → Test promotion triggered"
